@@ -85,6 +85,7 @@ export function buildResolution(db: DB, comparisonId: number): ResolutionResult 
       `SELECT c.id, c.project_id, c.created_at, c.sealed_by, c.sealed_at,
               p.name AS project_name,
               ov.label AS old_label, nv.label AS new_label,
+              ov.seq AS old_seq, nv.seq AS new_seq,
               ov.content AS old_content, nv.content AS new_content
          FROM comparisons c
          JOIN projects p ON p.id = c.project_id
@@ -200,6 +201,8 @@ export function buildResolution(db: DB, comparisonId: number): ResolutionResult 
     project_name: comparison.project_name,
     old_label: comparison.old_label,
     new_label: comparison.new_label,
+    old_seq: comparison.old_seq,
+    new_seq: comparison.new_seq,
     sealed_by: comparison.sealed_by,
     sealed_at: comparison.sealed_at,
     created_at: comparison.created_at,

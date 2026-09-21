@@ -21,7 +21,8 @@ function setup() {
   const pid = createProject(db, '封存测试办法');
   importVersion(db, pid, 'v1', V1);
   const r2 = importVersion(db, pid, 'v2', V2);
-  return { db, pid, comparisonId: r2.comparisonId! };
+  if (r2.status !== 'ok' || r2.comparisonId == null) throw new Error('夹具异常：v2 比对未生成');
+  return { db, pid, comparisonId: r2.comparisonId };
 }
 
 /** 将全部片段置为「接受变更」，得到可封存状态 */

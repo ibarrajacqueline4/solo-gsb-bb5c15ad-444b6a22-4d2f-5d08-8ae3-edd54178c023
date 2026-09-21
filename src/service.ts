@@ -7,46 +7,130 @@ export function createProject(db: DB, name: string): number {
   return Number(info.lastInsertRowid);
 }
 
-export interface ImportResult {
+/**
+ * 导入批注的来源信息：
+ *  - migrated：找到「以所选基线为新版」的最近一轮比对，已按锚点迁移；
+ *  - skipped：不存在这样的比对（如直接以首版为基线），明确不迁移，
+ *    绝不回退到项目最新一轮比对，以免误带批注。
+ */
+export type ImportMigrationInfo =
+  | (MigrationResult & { status: 'migrated'; source_comparison_id: number })
+  | {
+      status: 'skipped';
+      reason: 'no_source_comparison';
+      total: 0;
+      migrated: 0;
+      pending: 0;
+      message: string;
+    };
+
+export interface ImportOk {
+  status: 'ok';
   versionId: number;
   seq: number;
   comparisonId: number | null;
   fragmentCount: number;
-  migration: MigrationResult | null;
+  /** 本轮比对实际使用的基线版本（首版为 null） */
+  baselineVersionId: number | null;
+  migration: ImportMigrationInfo | null;
+}
+
+export type ImportVersionResult =
+  | ImportOk
+  | {
+      status: 'error';
+      reason: 'not_found' | 'baseline_not_in_project' | 'baseline_not_earlier';
+    };
+
+export type BaselineCheck =
+  | { ok: true; baseline: { id: number; seq: number; content: string } }
+  | { ok: false; reason: 'baseline_not_in_project' | 'baseline_not_earlier' };
+
+/**
+ * 纯函数校验：解析并校验显式指定的比对基线。
+ *  - 基线必须存在且属于本项目；
+ *  - 基线必须早于即将导入的新版本（newSeq 已按 MAX(seq)+1 确定）。
+ *
+ * 正常线性导入时后者必然成立；该校验是针对并发导入 / 脏数据的防御性不变量。
+ */
+export function resolveBaseline(
+  row: { id: number; seq: number; content: string } | undefined,
+  newSeq: number
+): BaselineCheck {
+  if (!row) return { ok: false, reason: 'baseline_not_in_project' };
+  if (row.seq >= newSeq) return { ok: false, reason: 'baseline_not_earlier' };
+  return { ok: true, baseline: row };
 }
 
 /**
- * 导入一个版本：若已存在上一版本，则自动生成比对（差异片段），
- * 并把上一轮比对中未解决的批注迁移到本次比对。
+ * 导入一个版本并在同一事务内完成：
+ *  1. 确定比对基线：默认取项目最新版本，也可显式指定项目内任一历史版本；
+ *  2. 校验基线归属本项目且早于本次导入的新版本；
+ *  3. 按所选基线生成差异片段（比对）；
+ *  4. 批注只允许从「以该基线为新版」的最近一轮比对迁移，找不到则明确不迁移。
  */
-export function importVersion(db: DB, projectId: number, label: string, content: string): ImportResult {
-  const tx = db.transaction((): ImportResult => {
-    const prev = db
+export function importVersion(
+  db: DB,
+  projectId: number,
+  label: string,
+  content: string,
+  baselineVersionId?: number
+): ImportVersionResult {
+  const tx = db.transaction((): ImportVersionResult => {
+    const project = db.prepare('SELECT id FROM projects WHERE id = ?').get(projectId);
+    if (!project) return { status: 'error', reason: 'not_found' };
+
+    const latest = db
       .prepare('SELECT id, seq, content FROM versions WHERE project_id = ? ORDER BY seq DESC LIMIT 1')
       .get(projectId) as { id: number; seq: number; content: string } | undefined;
 
-    const seq = prev ? prev.seq + 1 : 1;
+    const seq = latest ? latest.seq + 1 : 1;
+
+    // 基线校验在写入新版本之前完成：非法基线直接返回错误，事务内不留下任何数据。
+    let baseline: { id: number; seq: number; content: string };
+    if (baselineVersionId != null) {
+      const row = db
+        .prepare('SELECT id, seq, content FROM versions WHERE id = ? AND project_id = ?')
+        .get(baselineVersionId, projectId) as
+        | { id: number; seq: number; content: string }
+        | undefined;
+      const check = resolveBaseline(row, seq);
+      if (!check.ok) return { status: 'error', reason: check.reason };
+      baseline = check.baseline;
+    } else {
+      // 首版之外默认仍取最新版本
+      if (!latest) {
+        const firstId = Number(
+          db
+            .prepare('INSERT INTO versions (project_id, label, content, seq) VALUES (?, ?, ?, ?)')
+            .run(projectId, label, content, 1).lastInsertRowid
+        );
+        return {
+          status: 'ok',
+          versionId: firstId,
+          seq: 1,
+          comparisonId: null,
+          fragmentCount: 0,
+          baselineVersionId: null,
+          migration: null,
+        };
+      }
+      baseline = latest;
+    }
+
     const versionId = Number(
       db
         .prepare('INSERT INTO versions (project_id, label, content, seq) VALUES (?, ?, ?, ?)')
         .run(projectId, label, content, seq).lastInsertRowid
     );
 
-    if (!prev) {
-      return { versionId, seq, comparisonId: null, fragmentCount: 0, migration: null };
-    }
-
-    const prevComparison = db
-      .prepare('SELECT id FROM comparisons WHERE project_id = ? ORDER BY id DESC LIMIT 1')
-      .get(projectId) as { id: number } | undefined;
-
     const comparisonId = Number(
       db
         .prepare('INSERT INTO comparisons (project_id, old_version_id, new_version_id) VALUES (?, ?, ?)')
-        .run(projectId, prev.id, versionId).lastInsertRowid
+        .run(projectId, baseline.id, versionId).lastInsertRowid
     );
 
-    const fragments = buildFragments(splitParagraphs(prev.content), splitParagraphs(content));
+    const fragments = buildFragments(splitParagraphs(baseline.content), splitParagraphs(content));
     const insertFragment = db.prepare(
       `INSERT INTO fragments (comparison_id, ord, type, old_text, new_text, old_start, new_start, anchor)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
@@ -64,8 +148,42 @@ export function importVersion(db: DB, projectId: number, label: string, content:
       );
     }
 
-    const migration = prevComparison ? migrateAnnotations(db, prevComparison.id, comparisonId) : null;
-    return { versionId, seq, comparisonId, fragmentCount: fragments.length, migration };
+    // 仅允许来自「以所选基线为新版」的最近一轮比对；禁止回退到项目最新比对误带批注。
+    const sourceComparison = db
+      .prepare(
+        `SELECT id FROM comparisons
+          WHERE project_id = ? AND new_version_id = ?
+          ORDER BY id DESC LIMIT 1`
+      )
+      .get(projectId, baseline.id) as { id: number } | undefined;
+
+    let migration: ImportMigrationInfo;
+    if (sourceComparison) {
+      migration = {
+        status: 'migrated',
+        ...migrateAnnotations(db, sourceComparison.id, comparisonId),
+        source_comparison_id: sourceComparison.id,
+      };
+    } else {
+      migration = {
+        status: 'skipped',
+        reason: 'no_source_comparison',
+        total: 0,
+        migrated: 0,
+        pending: 0,
+        message: '所选基线历史上未作为新版参与过比对，批注未迁移',
+      };
+    }
+
+    return {
+      status: 'ok',
+      versionId,
+      seq,
+      comparisonId,
+      fragmentCount: fragments.length,
+      baselineVersionId: baseline.id,
+      migration,
+    };
   });
   return tx();
 }
@@ -323,6 +441,10 @@ export interface ComparisonDetail {
     project_name: string;
     old_label: string;
     new_label: string;
+    /** 基线（旧版）版本序号 */
+    old_seq: number;
+    /** 新版版本序号；old_seq + 1 !== new_seq 表示跨版本选基线 */
+    new_seq: number;
     sealed_by: string | null;
     sealed_at: string | null;
     created_at: string;
@@ -351,7 +473,9 @@ export function getComparisonDetail(db: DB, comparisonId: number): ComparisonDet
       `SELECT c.id, c.project_id, c.created_at, c.sealed_by, c.sealed_at,
               p.name AS project_name,
               ov.label AS old_label,
-              nv.label AS new_label
+              nv.label AS new_label,
+              ov.seq AS old_seq,
+              nv.seq AS new_seq
          FROM comparisons c
          JOIN projects p ON p.id = c.project_id
          JOIN versions ov ON ov.id = c.old_version_id
@@ -400,4 +524,81 @@ export function getComparisonDetail(db: DB, comparisonId: number): ComparisonDet
     unanchored,
     stats,
   };
+}
+
+export interface ProjectVersionRow {
+  id: number;
+  label: string;
+  seq: number;
+  created_at: string;
+  /** 该版本作为新版导入时使用的基线版本（首版为 null） */
+  baseline_id: number | null;
+  baseline_seq: number | null;
+  baseline_label: string | null;
+}
+
+export interface ProjectComparisonRow {
+  id: number;
+  created_at: string;
+  sealed_by: string | null;
+  sealed_at: string | null;
+  old_version_id: number;
+  new_version_id: number;
+  old_seq: number;
+  new_seq: number;
+  old_label: string;
+  new_label: string;
+  fragment_count: number;
+  undecided_count: number;
+  annotation_count: number;
+  open_count: number;
+}
+
+/** 组装项目详情：版本（含其导入时所选基线）与比对（含基线关系） */
+export function getProjectDetail(
+  db: DB,
+  projectId: number
+): {
+  project: { id: number; name: string; created_at: string };
+  versions: ProjectVersionRow[];
+  comparisons: ProjectComparisonRow[];
+} | null {
+  const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId) as
+    | { id: number; name: string; created_at: string }
+    | undefined;
+  if (!project) return null;
+
+  const versions = db
+    .prepare(
+      `SELECT v.id, v.label, v.seq, v.created_at,
+              c.old_version_id AS baseline_id,
+              bv.seq AS baseline_seq,
+              bv.label AS baseline_label
+         FROM versions v
+         LEFT JOIN comparisons c ON c.new_version_id = v.id
+         LEFT JOIN versions bv ON bv.id = c.old_version_id
+        WHERE v.project_id = ?
+        ORDER BY v.seq`
+    )
+    .all(projectId) as ProjectVersionRow[];
+
+  const comparisons = db
+    .prepare(
+      `SELECT c.id, c.created_at, c.sealed_by, c.sealed_at,
+              c.old_version_id, c.new_version_id,
+              ov.seq AS old_seq, nv.seq AS new_seq,
+              ov.label AS old_label, nv.label AS new_label,
+              (SELECT COUNT(*) FROM fragments f WHERE f.comparison_id = c.id)  AS fragment_count,
+              (SELECT COUNT(*) FROM fragments f WHERE f.comparison_id = c.id AND f.decision IS NULL) AS undecided_count,
+              (SELECT COUNT(*) FROM annotations a WHERE a.comparison_id = c.id) AS annotation_count,
+              (SELECT COUNT(*) FROM annotations a WHERE a.comparison_id = c.id AND a.status <> 'resolved') AS open_count
+         FROM comparisons c
+         JOIN versions ov ON ov.id = c.old_version_id
+         JOIN versions nv ON nv.id = c.new_version_id
+        WHERE c.project_id = ?
+        ORDER BY c.id`
+    )
+    .all(projectId) as ProjectComparisonRow[];
+
+  return { project, versions, comparisons };
 }

@@ -62,6 +62,9 @@ export function seedDemo(db: DB): DemoResult {
 
   importVersion(db, projectId, 'v1.0 征求意见稿', V1);
   const r2 = importVersion(db, projectId, 'v2.0 送审稿', V2);
+  if (r2.status !== 'ok' || r2.comparisonId == null) {
+    throw new Error('示例数据异常：v2 比对未生成');
+  }
 
   const fragments = db
     .prepare('SELECT id, new_text FROM fragments WHERE comparison_id = ?')
@@ -86,11 +89,14 @@ export function seedDemo(db: DB): DemoResult {
   db.prepare(`UPDATE annotations SET status = 'resolved' WHERE id = ?`).run(resolvedId);
 
   const r3 = importVersion(db, projectId, 'v3.0 正式发布稿', V3);
+  if (r3.status !== 'ok' || r3.comparisonId == null) {
+    throw new Error('示例数据异常：v3 比对未生成');
+  }
 
   return {
     projectId,
     projectName,
-    comparisons: [r2.comparisonId, r3.comparisonId].filter((x): x is number => x != null),
+    comparisons: [r2.comparisonId, r3.comparisonId],
     migration: r3.migration,
   };
 }

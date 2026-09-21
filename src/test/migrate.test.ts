@@ -13,6 +13,7 @@ function setup() {
   const pid = createProject(db, '测试办法');
   importVersion(db, pid, 'v1', V1);
   const r2 = importVersion(db, pid, 'v2', V2);
+  if (r2.status !== 'ok' || r2.comparisonId == null) throw new Error('夹具异常：v2 比对未生成');
   return { db, pid, r2 };
 }
 
@@ -46,7 +47,14 @@ test('未解决批注迁移到最相近片段，无法匹配的标为待复核�
   db.prepare(`UPDATE annotations SET status = 'resolved' WHERE id = ?`).run(resolvedId);
 
   const r3 = importVersion(db, pid, 'v3', V3);
-  assert.deepEqual(r3.migration, { total: 2, migrated: 1, pending: 1 });
+  if (r3.status !== 'ok') throw new Error('v3 导入失败');
+  assert.equal(r3.migration?.status, 'migrated');
+  if (r3.migration?.status !== 'migrated') throw new Error('迁移状态异常');
+  assert.equal(r3.migration.source_comparison_id, r2.comparisonId);
+  assert.deepEqual(
+    { total: r3.migration.total, migrated: r3.migration.migrated, pending: r3.migration.pending },
+    { total: 2, migrated: 1, pending: 1 }
+  );
 
   const detail = getComparisonDetail(db, r3.comparisonId!)!;
   assert.equal(detail.stats.annotations.total, 2);
@@ -77,5 +85,11 @@ test('锚点与新片段完全一致时相似度为 1', () => {
   // 构造一个 v3 仅修改第一条的场景，第二条批注应转待复核
   const V3b = '第一条 总则（2026 年修订）。\n\n第二条 应当在二十四小时内报告。\n\n第三条 罚则内容甲，并处一万元罚款。';
   const r3 = importVersion(db, pid, 'v3', V3b);
-  assert.deepEqual(r3.migration, { total: 1, migrated: 0, pending: 1 });
+  if (r3.status !== 'ok') throw new Error('v3 导入失败');
+  assert.equal(r3.migration?.status, 'migrated');
+  if (r3.migration?.status !== 'migrated') throw new Error('迁移状态异常');
+  assert.deepEqual(
+    { total: r3.migration.total, migrated: r3.migration.migrated, pending: r3.migration.pending },
+    { total: 1, migrated: 0, pending: 1 }
+  );
 });

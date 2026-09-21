@@ -108,6 +108,57 @@ textarea { width: 100%; resize: vertical; font-family: inherit; }
 .inline-form input { flex: 1; }
 
 .import-form { display: flex; flex-direction: column; gap: 10px; max-width: 760px; }
+.baseline-pick {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  color: var(--dim);
+}
+.baseline-pick select { flex: 1; max-width: 420px; }
+
+/* 比对基线关系标识 */
+.seq-tag {
+  display: inline-block;
+  background: #eef2ff;
+  color: #3730a3;
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  margin: 0 2px;
+}
+.base-chip {
+  display: inline-block;
+  margin-left: 8px;
+  background: #f1f5f9;
+  color: var(--dim);
+  border-radius: 4px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+.base-chip.first { background: #ecfeff; color: #0e7490; }
+.base-rel {
+  font-size: 12px;
+  color: #7c3aed;
+  margin: 4px 0 2px;
+}
+.base-rel.adjacent { color: var(--dim); }
+
+.baseline-banner {
+  border: 1px solid #c4b5fd;
+  background: #f5f3ff;
+  color: #5b21b6;
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  font-size: 13px;
+}
+.baseline-banner.adjacent {
+  border-color: var(--border);
+  background: #f8fafc;
+  color: var(--dim);
+}
 
 /* 卡片 */
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }

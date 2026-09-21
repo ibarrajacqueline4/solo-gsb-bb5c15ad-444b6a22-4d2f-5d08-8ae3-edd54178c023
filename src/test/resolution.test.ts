@@ -57,7 +57,8 @@ function setup() {
   const pid = createProject(db, '决议稿测试办法');
   importVersion(db, pid, 'v1', V1);
   const r2 = importVersion(db, pid, 'v2', V2);
-  return { db, comparisonId: r2.comparisonId! };
+  if (r2.status !== 'ok' || r2.comparisonId == null) throw new Error('夹具异常：v2 比对未生成');
+  return { db, comparisonId: r2.comparisonId };
 }
 
 interface FragInfo {
