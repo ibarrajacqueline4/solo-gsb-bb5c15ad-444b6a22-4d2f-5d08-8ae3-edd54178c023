@@ -7,46 +7,130 @@ export function createProject(db: DB, name: string): number {
   return Number(info.lastInsertRowid);
 }
 
+/** 批注迁移的轮次来源信息 */
+export interface MigrationSummary {
+  /** 参与迁移的未解决批注总数 */
+  total: number;
+  /** 成功锚定到新片段的数量 */
+  migrated: number;
+  /** 无法匹配、被标记为「待复核」的数量 */
+  pending: number;
+  /** 本轮批注迁移取自哪一轮比对（new_version_id = 所选基线）；不存在则为 null */
+  source_comparison_id: number | null;
+  /** 未发生迁移时的原因 */
+  skip_reason: 'first_version' | 'no_baseline_comparison' | null;
+}
+
 export interface ImportResult {
+  status: 'ok';
   versionId: number;
   seq: number;
   comparisonId: number | null;
   fragmentCount: number;
-  migration: MigrationResult | null;
+  /** 实际使用的比对基线版本（首版无基线） */
+  baselineVersionId: number | null;
+  baselineSeq: number | null;
+  baselineLabel: string | null;
+  /** 是否为调用方显式指定的基线（false = 默认最新版本 / 首版） */
+  baselineExplicit: boolean;
+  migration: MigrationSummary | null;
+}
+
+export type ImportVersionResult =
+  | ImportResult
+  | { status: 'project_not_found' }
+  | { status: 'baseline_not_found' }
+  | { status: 'baseline_foreign_project' }
+  | { status: 'baseline_not_earlier' };
+
+interface VersionRow {
+  id: number;
+  project_id: number;
+  label: string;
+  seq: number;
+  content: string;
 }
 
 /**
- * 导入一个版本：若已存在上一版本，则自动生成比对（差异片段），
- * 并把上一轮比对中未解决的批注迁移到本次比对。
+ * 导入一个版本：
+ *  - 首版仅存档（不允许携带基线）；
+ *  - 其后默认以项目内最新版本为「比对基线」自动生成差异片段，
+ *    也可由 baselineVersionId 显式指定本项目任一更早的历史版本；
+ *  - 批注仅从「以该基线为新版的最近一轮比对」迁移，
+ *    找不到这样的比对时明确不迁移（禁止回退到项目最新比对）。
+ * 全部步骤在同一个数据库事务内完成，任何校验失败整体回滚。
  */
-export function importVersion(db: DB, projectId: number, label: string, content: string): ImportResult {
-  const tx = db.transaction((): ImportResult => {
+export function importVersion(
+  db: DB,
+  projectId: number,
+  label: string,
+  content: string,
+  baselineVersionId?: number | null
+): ImportVersionResult {
+  const tx = db.transaction((): ImportVersionResult => {
+    const project = db.prepare('SELECT id FROM projects WHERE id = ?').get(projectId);
+    if (!project) return { status: 'project_not_found' };
+
     const prev = db
       .prepare('SELECT id, seq, content FROM versions WHERE project_id = ? ORDER BY seq DESC LIMIT 1')
-      .get(projectId) as { id: number; seq: number; content: string } | undefined;
+      .get(projectId) as Pick<VersionRow, 'id' | 'seq' | 'content'> | undefined;
 
     const seq = prev ? prev.seq + 1 : 1;
+
+    // 基线解析：未指定时默认最新版本；显式指定时校验归属与先后
+    let baseline: Pick<VersionRow, 'id' | 'seq' | 'label' | 'content'> | null = null;
+    let baselineExplicit = false;
+    if (baselineVersionId != null) {
+      baselineExplicit = true;
+      const row = db
+        .prepare('SELECT id, project_id, label, seq, content FROM versions WHERE id = ?')
+        .get(baselineVersionId) as Pick<VersionRow, 'id' | 'project_id' | 'label' | 'seq' | 'content'> | undefined;
+      if (!row) return { status: 'baseline_not_found' };
+      if (row.project_id !== projectId) return { status: 'baseline_foreign_project' };
+      // 新版本尚未入库，其序号为 seq；基线必须严格早于新版本
+      if (row.seq >= seq) return { status: 'baseline_not_earlier' };
+      baseline = row;
+    } else if (prev) {
+      const row = db
+        .prepare('SELECT id, label, seq, content FROM versions WHERE id = ?')
+        .get(prev.id) as Pick<VersionRow, 'id' | 'label' | 'seq' | 'content'>;
+      baseline = row;
+    }
+
     const versionId = Number(
       db
         .prepare('INSERT INTO versions (project_id, label, content, seq) VALUES (?, ?, ?, ?)')
         .run(projectId, label, content, seq).lastInsertRowid
     );
 
-    if (!prev) {
-      return { versionId, seq, comparisonId: null, fragmentCount: 0, migration: null };
+    if (!baseline) {
+      return {
+        status: 'ok',
+        versionId,
+        seq,
+        comparisonId: null,
+        fragmentCount: 0,
+        baselineVersionId: null,
+        baselineSeq: null,
+        baselineLabel: null,
+        baselineExplicit: false,
+        migration: {
+          total: 0,
+          migrated: 0,
+          pending: 0,
+          source_comparison_id: null,
+          skip_reason: 'first_version',
+        },
+      };
     }
-
-    const prevComparison = db
-      .prepare('SELECT id FROM comparisons WHERE project_id = ? ORDER BY id DESC LIMIT 1')
-      .get(projectId) as { id: number } | undefined;
 
     const comparisonId = Number(
       db
         .prepare('INSERT INTO comparisons (project_id, old_version_id, new_version_id) VALUES (?, ?, ?)')
-        .run(projectId, prev.id, versionId).lastInsertRowid
+        .run(projectId, baseline.id, versionId).lastInsertRowid
     );
 
-    const fragments = buildFragments(splitParagraphs(prev.content), splitParagraphs(content));
+    const fragments = buildFragments(splitParagraphs(baseline.content), splitParagraphs(content));
     const insertFragment = db.prepare(
       `INSERT INTO fragments (comparison_id, ord, type, old_text, new_text, old_start, new_start, anchor)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
@@ -64,8 +148,42 @@ export function importVersion(db: DB, projectId: number, label: string, content:
       );
     }
 
-    const migration = prevComparison ? migrateAnnotations(db, prevComparison.id, comparisonId) : null;
-    return { versionId, seq, comparisonId, fragmentCount: fragments.length, migration };
+    // 批注迁移只允许来自「以该基线为新版的最近一轮比对」，
+    // 绝不能退回项目最新比对，避免把别的基线上的批注误带入本轮。
+    const sourceComparison = db
+      .prepare(
+        `SELECT id FROM comparisons
+          WHERE project_id = ? AND new_version_id = ?
+          ORDER BY id DESC LIMIT 1`
+      )
+      .get(projectId, baseline.id) as { id: number } | undefined;
+
+    let migration: MigrationSummary;
+    if (sourceComparison) {
+      const r: MigrationResult = migrateAnnotations(db, sourceComparison.id, comparisonId);
+      migration = { ...r, source_comparison_id: sourceComparison.id, skip_reason: null };
+    } else {
+      migration = {
+        total: 0,
+        migrated: 0,
+        pending: 0,
+        source_comparison_id: null,
+        skip_reason: 'no_baseline_comparison',
+      };
+    }
+
+    return {
+      status: 'ok',
+      versionId,
+      seq,
+      comparisonId,
+      fragmentCount: fragments.length,
+      baselineVersionId: baseline.id,
+      baselineSeq: baseline.seq,
+      baselineLabel: baseline.label,
+      baselineExplicit,
+      migration,
+    };
   });
   return tx();
 }
@@ -321,6 +439,12 @@ export interface ComparisonDetail {
     id: number;
     project_id: number;
     project_name: string;
+    old_version_id: number;
+    new_version_id: number;
+    old_seq: number;
+    new_seq: number;
+    /** 基线与新版之间跳过的版本数；0 表示相邻版本比对 */
+    skipped_version_count: number;
     old_label: string;
     new_label: string;
     sealed_by: string | null;
@@ -349,6 +473,9 @@ export function getComparisonDetail(db: DB, comparisonId: number): ComparisonDet
   const comparison = db
     .prepare(
       `SELECT c.id, c.project_id, c.created_at, c.sealed_by, c.sealed_at,
+              c.old_version_id, c.new_version_id,
+              ov.seq AS old_seq, nv.seq AS new_seq,
+              (nv.seq - ov.seq - 1) AS skipped_version_count,
               p.name AS project_name,
               ov.label AS old_label,
               nv.label AS new_label

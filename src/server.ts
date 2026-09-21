@@ -73,11 +73,21 @@ app.get('/api/projects/:id', (req, res) => {
   if (!project) return notFound(res, '项目不存在');
 
   const versions = db
-    .prepare('SELECT id, label, seq, created_at FROM versions WHERE project_id = ? ORDER BY seq')
+    .prepare(
+      `SELECT v.id, v.label, v.seq, v.created_at,
+              (SELECT COUNT(*) FROM comparisons c WHERE c.new_version_id = v.id) AS baseline_count,
+              (SELECT COUNT(*) FROM comparisons c WHERE c.old_version_id = v.id) AS compared_count
+         FROM versions v
+        WHERE v.project_id = ?
+        ORDER BY v.seq`
+    )
     .all(id);
   const comparisons = db
     .prepare(
       `SELECT c.id, c.created_at, c.sealed_by, c.sealed_at,
+              c.old_version_id, c.new_version_id,
+              ov.seq AS old_seq, nv.seq AS new_seq,
+              (nv.seq - ov.seq - 1) AS skipped_version_count,
               ov.label AS old_label, nv.label AS new_label,
               (SELECT COUNT(*) FROM fragments f WHERE f.comparison_id = c.id)  AS fragment_count,
               (SELECT COUNT(*) FROM fragments f WHERE f.comparison_id = c.id AND f.decision IS NULL) AS undecided_count,
@@ -99,7 +109,7 @@ app.delete('/api/projects/:id', (req, res) => {
   res.status(204).end();
 });
 
-// ---------- 版本导入（自动比对 + 批注迁移） ----------
+// ---------- 版本导入（按所选基线自动比对 + 批注迁移） ----------
 app.post('/api/projects/:id/versions', (req, res) => {
   const projectId = Number(req.params.id);
   const project = db.prepare('SELECT id FROM projects WHERE id = ?').get(projectId);
@@ -110,7 +120,28 @@ app.post('/api/projects/:id/versions', (req, res) => {
   if (!label) return badRequest(res, '版本标签必填');
   if (!content.trim()) return badRequest(res, '版本内容必填');
 
-  const result = importVersion(db, projectId, label, content);
+  // 基线可选：缺省（undefined）→ 默认最新版本；显式 null 非法，须为版本 ID
+  let baselineVersionId: number | null | undefined;
+  if (req.body?.baseline_version_id !== undefined) {
+    const raw = req.body.baseline_version_id;
+    if (raw === null) return badRequest(res, '比对基线不存在（基线必须是本项目的历史版本）');
+    if (typeof raw !== 'number' || !Number.isInteger(raw) || raw <= 0) {
+      return badRequest(res, '比对基线版本 ID 非法');
+    }
+    baselineVersionId = raw;
+  }
+
+  const result = importVersion(db, projectId, label, content, baselineVersionId);
+  if (result.status === 'project_not_found') return notFound(res, '项目不存在');
+  if (result.status === 'baseline_not_found') {
+    return badRequest(res, '指定的比对基线版本不存在');
+  }
+  if (result.status === 'baseline_foreign_project') {
+    return badRequest(res, '比对基线必须属于当前项目');
+  }
+  if (result.status === 'baseline_not_earlier') {
+    return badRequest(res, '比对基线必须早于本次导入的新版本');
+  }
   res.status(201).json(result);
 });
 

@@ -21,6 +21,7 @@ function setup() {
   const pid = createProject(db, '封存测试办法');
   importVersion(db, pid, 'v1', V1);
   const r2 = importVersion(db, pid, 'v2', V2);
+  if (r2.status !== 'ok') throw new Error(`v2 导入失败：${r2.status}`);
   return { db, pid, comparisonId: r2.comparisonId! };
 }
 

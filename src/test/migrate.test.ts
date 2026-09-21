@@ -13,6 +13,7 @@ function setup() {
   const pid = createProject(db, '测试办法');
   importVersion(db, pid, 'v1', V1);
   const r2 = importVersion(db, pid, 'v2', V2);
+  if (r2.status !== 'ok') throw new assert.AssertionError({ message: `v2 导入失败：${r2.status}` });
   return { db, pid, r2 };
 }
 
@@ -28,9 +29,10 @@ test('导入首个版本不产生比对，导入第二版本生成差异片段',
 
 test('未解决批注迁移到最相近片段，无法匹配的标为待复核，已解决的不迁移', () => {
   const { db, pid, r2 } = setup();
+  const comparisonId2 = r2.comparisonId!;
   const frags = db
     .prepare('SELECT * FROM fragments WHERE comparison_id = ?')
-    .all(r2.comparisonId!) as Array<{ id: number; new_text: string }>;
+    .all(comparisonId2) as Array<{ id: number; new_text: string }>;
   const frag2 = frags.find((f) => f.new_text.includes('二十四小时'))!;
   const frag3 = frags.find((f) => f.new_text.includes('一万元'))!;
 
@@ -46,7 +48,12 @@ test('未解决批注迁移到最相近片段，无法匹配的标为待复核�
   db.prepare(`UPDATE annotations SET status = 'resolved' WHERE id = ?`).run(resolvedId);
 
   const r3 = importVersion(db, pid, 'v3', V3);
-  assert.deepEqual(r3.migration, { total: 2, migrated: 1, pending: 1 });
+  if (r3.status !== 'ok') throw new assert.AssertionError({ message: `v3 导入失败：${r3.status}` });
+  assert.equal(r3.migration!.total, 2);
+  assert.equal(r3.migration!.migrated, 1);
+  assert.equal(r3.migration!.pending, 1);
+  assert.equal(r3.migration!.skip_reason, null);
+  assert.equal(r3.migration!.source_comparison_id, comparisonId2);
 
   const detail = getComparisonDetail(db, r3.comparisonId!)!;
   assert.equal(detail.stats.annotations.total, 2);
@@ -77,5 +84,8 @@ test('锚点与新片段完全一致时相似度为 1', () => {
   // 构造一个 v3 仅修改第一条的场景，第二条批注应转待复核
   const V3b = '第一条 总则（2026 年修订）。\n\n第二条 应当在二十四小时内报告。\n\n第三条 罚则内容甲，并处一万元罚款。';
   const r3 = importVersion(db, pid, 'v3', V3b);
-  assert.deepEqual(r3.migration, { total: 1, migrated: 0, pending: 1 });
+  if (r3.status !== 'ok') throw new assert.AssertionError({ message: `v3 导入失败：${r3.status}` });
+  assert.equal(r3.migration!.total, 1);
+  assert.equal(r3.migration!.migrated, 0);
+  assert.equal(r3.migration!.pending, 1);
 });

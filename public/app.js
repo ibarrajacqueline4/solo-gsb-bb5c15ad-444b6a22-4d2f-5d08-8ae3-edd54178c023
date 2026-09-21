@@ -97,16 +97,29 @@ async function renderProject(id) {
       <h3>导入新版本</h3>
       <form id="import-form" data-project="${project.id}" class="import-form">
         <input name="label" required maxlength="100" placeholder="版本标签，如：v2.0 送审稿">
+        ${versions.length === 0 ? '' : `
+        <label class="baseline-pick">比对基线
+          <select name="baseline_version_id">
+            ${versions.slice().sort((a, b) => b.seq - a.seq).map((v, i) => `
+              <option value="${v.id}"${i === 0 ? ' selected' : ''}>${i === 0 ? '最新版本（默认）：' : ''}v${v.seq} ${esc(v.label)}</option>`).join('')}
+          </select>
+        </label>`}
         <textarea name="content" required rows="9"
           placeholder="粘贴规范全文。段落之间用空行分隔；若无空行，则每行视为一条。"></textarea>
-        <button class="btn primary" type="submit">导入并与上一版本比对</button>
-        <p class="hint">首个版本仅存档；从第二个版本起自动生成差异比对，并迁移上一轮未解决的批注。</p>
+        <button class="btn primary" type="submit">导入并与所选基线比对</button>
+        <p class="hint">首个版本仅存档；其后默认以<b>最新版本</b>为比对基线，也可改选本项目任一历史版本。批注只会从「以该基线为新版的最近一轮比对」迁移；该基线从未当过新版时，本轮不迁移批注。</p>
       </form>
 
       <h3>版本记录</h3>
       ${versions.length === 0 ? '<p class="empty">尚未导入任何版本。</p>' : `
         <ol class="version-list">
-          ${versions.map((v) => `<li><span class="tag">v${v.seq}</span> ${esc(v.label)}
+          ${versions.map((v, i) => `<li>
+            <span class="tag">v${v.seq}</span> ${esc(v.label)}
+            ${i === versions.length - 1 ? '<span class="tag tag-latest">最新</span>' : ''}
+            ${v.baseline_count > 0
+              ? `<span class="baseline-chip" title="有 ${v.baseline_count} 轮比对以该版本作为新版">作为新版 ${v.baseline_count} 轮</span>` : ''}
+            ${v.compared_count > 0
+              ? `<span class="dim">作为比对基线 ${v.compared_count} 轮</span>` : ''}
             <span class="dim">${esc(v.created_at)}</span></li>`).join('')}
         </ol>`}
 
@@ -118,8 +131,13 @@ async function renderProject(id) {
               ${c.sealed_at
                 ? '<span class="seal-badge">🔒 已封存</span>'
                 : '<span class="draft-badge">📝 草稿</span>'}
-              ${esc(c.old_label)} → ${esc(c.new_label)}
+              <span class="tag">v${c.old_seq}</span> ${esc(c.old_label)}
+              <span class="arrow">→</span>
+              <span class="tag">v${c.new_seq}</span> ${esc(c.new_label)}
             </div>
+            ${c.skipped_version_count > 0
+              ? `<div class="card-meta baseline-note">🧭 指定基线：跳过 ${c.skipped_version_count} 个中间版本，直接与 v${c.old_seq} 比对</div>`
+              : '<div class="card-meta dim">相邻版本比对（默认基线 = 上一版本）</div>'}
             <div class="card-meta">${c.fragment_count} 处差异 · ${c.annotation_count} 条批注
               ${c.open_count > 0 ? ` · <b class="warn">${c.open_count} 条批注待办</b>` : ''}
               ${!c.sealed_at && c.undecided_count > 0 ? ` · <b class="warn">${c.undecided_count} 个片段未结论</b>` : ''}</div>
@@ -384,11 +402,11 @@ function drawComparison() {
   app.innerHTML = `
     <nav class="crumbs">
       <a href="#/">全部项目</a> / <a href="#/projects/${comparison.project_id}">${esc(comparison.project_name)}</a>
-      / ${esc(comparison.old_label)} → ${esc(comparison.new_label)}
+      / <span class="tag">v${comparison.old_seq}</span> ${esc(comparison.old_label)} → <span class="tag">v${comparison.new_seq}</span> ${esc(comparison.new_label)}
     </nav>
     <section class="panel">
       <div class="panel-head wrap">
-        <h2>${esc(comparison.old_label)} → ${esc(comparison.new_label)}</h2>
+        <h2><span class="tag">v${comparison.old_seq}</span> ${esc(comparison.old_label)} <span class="arrow">→</span> <span class="tag">v${comparison.new_seq}</span> ${esc(comparison.new_label)}</h2>
         <div class="head-side">
           ${comparison.sealed_at
             ? '<span class="seal-badge big">🔒 已封存</span>'
@@ -400,6 +418,13 @@ function drawComparison() {
             <a class="btn small" href="/api/comparisons/${cmp.id}/export?format=md">Markdown</a>
           </div>
         </div>
+      </div>
+
+      <div class="baseline-banner${comparison.skipped_version_count > 0 ? ' crossed' : ''}">
+        🧭 比对基线：<b>v${comparison.old_seq} ${esc(comparison.old_label)}</b>
+        ${comparison.skipped_version_count > 0
+          ? `（指定历史版本，跳过了 ${comparison.skipped_version_count} 个中间版本，非相邻版本比对）`
+          : '（相邻版本，默认取上一版本为基线）'}
       </div>
 
       ${comparison.sealed_at ? `
@@ -476,13 +501,21 @@ document.addEventListener('submit', async (e) => {
       const projectId = form.dataset.project;
       const label = form.elements.label.value.trim();
       const content = form.elements.content.value;
-      const r = await api('POST', `/api/projects/${projectId}/versions`, { label, content });
+      const payload = { label, content };
+      const baselineSelect = form.elements.baseline_version_id;
+      if (baselineSelect) {
+        payload.baseline_version_id = Number(baselineSelect.value);
+      }
+      const r = await api('POST', `/api/projects/${projectId}/versions`, payload);
       if (r.comparisonId) {
         const mig = r.migration;
-        toast(
-          `比对完成：${r.fragmentCount} 处差异` +
-            (mig ? `；批注迁移 ${mig.migrated} 条、待复核 ${mig.pending} 条` : '')
-        );
+        const parts = [`比对完成：基线 v${r.baselineSeq} ${r.baselineLabel} → v${r.seq}，共 ${r.fragmentCount} 处差异`];
+        if (mig && mig.skip_reason === null) {
+          parts.push(`批注迁移 ${mig.migrated} 条、待复核 ${mig.pending} 条`);
+        } else if (mig && mig.skip_reason === 'no_baseline_comparison') {
+          parts.push('该基线没有对应的历史比对，批注未迁移（0 条）');
+        }
+        toast(parts.join('；'));
         location.hash = `#/comparisons/${r.comparisonId}`;
       } else {
         toast('首个版本已存档，再导入一个版本即可比对');

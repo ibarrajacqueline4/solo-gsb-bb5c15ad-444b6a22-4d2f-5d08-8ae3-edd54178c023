@@ -60,8 +60,10 @@ export function seedDemo(db: DB): DemoResult {
   const projectName = '示例：平台数据安全管理办法';
   const projectId = createProject(db, projectName);
 
-  importVersion(db, projectId, 'v1.0 征求意见稿', V1);
+  const r1 = importVersion(db, projectId, 'v1.0 征求意见稿', V1);
+  if (r1.status !== 'ok') throw new Error(`示例数据异常：首版导入失败（${r1.status}）`);
   const r2 = importVersion(db, projectId, 'v2.0 送审稿', V2);
+  if (r2.status !== 'ok') throw new Error(`示例数据异常：v2 导入失败（${r2.status}）`);
 
   const fragments = db
     .prepare('SELECT id, new_text FROM fragments WHERE comparison_id = ?')
@@ -86,6 +88,7 @@ export function seedDemo(db: DB): DemoResult {
   db.prepare(`UPDATE annotations SET status = 'resolved' WHERE id = ?`).run(resolvedId);
 
   const r3 = importVersion(db, projectId, 'v3.0 正式发布稿', V3);
+  if (r3.status !== 'ok') throw new Error(`示例数据异常：v3 导入失败（${r3.status}）`);
 
   return {
     projectId,

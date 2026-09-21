@@ -83,6 +83,9 @@ export function buildResolution(db: DB, comparisonId: number): ResolutionResult 
   const comparison = db
     .prepare(
       `SELECT c.id, c.project_id, c.created_at, c.sealed_by, c.sealed_at,
+              c.old_version_id, c.new_version_id,
+              ov.seq AS old_seq, nv.seq AS new_seq,
+              (nv.seq - ov.seq - 1) AS skipped_version_count,
               p.name AS project_name,
               ov.label AS old_label, nv.label AS new_label,
               ov.content AS old_content, nv.content AS new_content
@@ -198,6 +201,11 @@ export function buildResolution(db: DB, comparisonId: number): ResolutionResult 
     id: comparison.id,
     project_id: comparison.project_id,
     project_name: comparison.project_name,
+    old_version_id: comparison.old_version_id,
+    new_version_id: comparison.new_version_id,
+    old_seq: comparison.old_seq,
+    new_seq: comparison.new_seq,
+    skipped_version_count: comparison.skipped_version_count,
     old_label: comparison.old_label,
     new_label: comparison.new_label,
     sealed_by: comparison.sealed_by,

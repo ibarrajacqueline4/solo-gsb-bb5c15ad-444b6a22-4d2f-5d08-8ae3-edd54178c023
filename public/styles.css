@@ -135,6 +135,34 @@ textarea { width: 100%; resize: vertical; font-family: inherit; }
   font-size: 12px;
   margin-right: 6px;
 }
+.tag-latest { background: #dcfce7; color: #166534; }
+.arrow { color: var(--dim); margin: 0 4px; }
+.baseline-chip {
+  display: inline-block;
+  background: #fef9c3;
+  color: #854d0e;
+  border-radius: 4px;
+  padding: 0 8px;
+  font-size: 12px;
+  margin: 0 6px;
+}
+.baseline-pick { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--text); }
+.baseline-pick select { flex: 1; max-width: 420px; }
+.card .baseline-note { color: #92400e; margin: 4px 0; }
+.baseline-banner {
+  border: 1px solid #c7d2fe;
+  background: #eef2ff;
+  color: #3730a3;
+  border-radius: 8px;
+  padding: 8px 14px;
+  margin: 10px 0;
+  font-size: 14px;
+}
+.baseline-banner.crossed {
+  border-color: #fcd34d;
+  background: #fffbeb;
+  color: #92400e;
+}
 
 /* 统计与筛选 */
 .stats { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
